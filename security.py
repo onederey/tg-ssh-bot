@@ -21,6 +21,7 @@ BOT_COMMANDS = [
     BotCommand(command="pwd", description="Текущая директория"),
     BotCommand(command="cd", description="Сменить директорию (/cd <путь>)"),
     BotCommand(command="ls", description="Список файлов (/ls [путь])"),
+    BotCommand(command="status", description="Информация о системе"),
     BotCommand(command="get", description="Скачать файл (/get <путь>)"),
     BotCommand(command="fav", description="Избранные команды"),
     BotCommand(command="kill", description="Прервать выполняющийся процесс"),

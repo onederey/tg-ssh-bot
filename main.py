@@ -6,13 +6,15 @@ import asyncio
 import html
 import logging
 import os
+import shutil
 import sys
+from typing import Optional
 from telethon import events
 from telethon.tl.custom import Button
 
 from client import create_telegram_client
 from config import load_config
-from executor import CommandExecutor
+from executor import CommandExecutor, clean_terminal_output
 from favorites import FavoritesManager
 from file_manager import FileManager
 from security import configure_bot_command_scopes, is_authorized, require_auth
@@ -35,7 +37,6 @@ def setup_logging(log_level: str = "INFO", log_file: str = None):
     )
 
 logger = logging.getLogger("tg_ssh_bot")
-
 
 async def main():
     config = load_config()
@@ -71,6 +72,7 @@ async def main():
             "• <code>/cd &lt;директория&gt;</code> — сменить текущую директорию\n"
             "• <code>/pwd</code> — показать текущую директорию\n"
             "• <code>/ls [директория]</code> — список файлов\n"
+            "• <code>/status</code> — информация о системе\n"
             "• <code>/get &lt;файл&gt;</code> — скачать файл с сервера (до 2 ГБ)\n"
             "• Отправьте любой документ боту, чтобы загрузить его на сервер\n"
             "• <code>/kill</code> (или кнопка «⏹ Прервать (Ctrl+C)») — остановить текущий процесс\n"
@@ -104,6 +106,42 @@ async def main():
         path = event.pattern_match.group(1)
         workdir = executor.get_workdir(event.sender_id)
         await file_manager.list_directory(event.chat_id, path, workdir)
+
+    @client.on(events.NewMessage(pattern=r"^/status$"))
+    @auth_check
+    async def cmd_status(event):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "fastfetch",
+                "--logo",
+                "none",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            output = clean_terminal_output(stdout.decode("utf-8", errors="replace")).strip()
+
+            if output:
+                if len(output) > 3800:
+                    output = output[:3800] + "\n..."
+                await event.reply(
+                    f"📊 <b>Информация о системе:</b>\n<pre><code>{html.escape(output)}</code></pre>",
+                    parse_mode="html",
+                )
+            else:
+                err_text = clean_terminal_output(stderr.decode("utf-8", errors="replace")).strip()
+                if err_text:
+                    await event.reply(f"❌ Ошибка:\n<code>{html.escape(err_text)}</code>", parse_mode="html")
+                else:
+                    await event.reply("⚠️ Не удалось получить информацию о системе (пустой вывод).")
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            await event.reply("❌ Превышено время ожидания ответа от fastfetch (таймаут 5 сек).")
+        except Exception as e:
+            await event.reply(f"❌ Ошибка при выполнении fastfetch: <code>{html.escape(str(e))}</code>", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/get(?:\s+(.+))?$"))
     @auth_check
@@ -263,7 +301,7 @@ async def main():
             return
 
         # Игнорируем встроенные команды бота
-        if any(text.startswith(prefix) for prefix in ["/start", "/help", "/pwd", "/cd", "/ls", "/get", "/kill", "/fav"]):
+        if any(text.startswith(prefix) for prefix in ["/start", "/help", "/pwd", "/cd", "/ls", "/status", "/get", "/kill", "/fav"]):
             return
 
         # Если команда начинается с /run, отсекаем его
