@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+venv/
+ENV/
+
+# Telethon
+*.session
+*.session-journal
+
+# Project data
+favorites.json
+output.txt
+bot.log
