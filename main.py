@@ -73,7 +73,7 @@ async def main():
             "• <code>/ls [директория]</code> — список файлов\n"
             "• <code>/get &lt;файл&gt;</code> — скачать файл с сервера (до 2 ГБ)\n"
             "• Отправьте любой документ боту, чтобы загрузить его на сервер\n"
-            "• <code>/kill</code> — принудительно остановить текущий запущенный процесс\n"
+            "• <code>/kill</code> (или кнопка «⏹ Прервать (Ctrl+C)») — остановить текущий процесс\n"
             "• <code>/fav</code> — панель избранных команд (с инлайн-кнопками)\n"
             "• <code>/fav add &lt;имя&gt; &lt;команда&gt;</code> — добавить в избранное\n"
             "• <code>/fav del &lt;имя&gt;</code> — удалить из избранного\n"
@@ -203,15 +203,52 @@ async def main():
             else:
                 await event.answer("Это не ваш процесс!", alert=True)
 
+        elif data.startswith("rerun:"):
+            cmd_id = data.split(":", 1)[1]
+            cmd = executor.get_saved_command(cmd_id)
+            if not cmd:
+                await event.answer("Команда не найдена или устарела.", alert=True)
+                return
+
+            if executor.get_active_process(event.sender_id):
+                await event.answer("⚠️ У вас уже запущен процесс! Дождитесь завершения или прервите его.", alert=True)
+                return
+
+            await event.answer("Повторный запуск...")
+            await executor.execute(event.chat_id, event.sender_id, cmd)
+
+        elif data.startswith("copy_cmd:"):
+            cmd_id = data.split(":", 1)[1]
+            cmd = executor.get_saved_command(cmd_id)
+            if cmd:
+                await event.answer("Команда отправлена")
+                if len(cmd) <= 3800:
+                    await event.reply(
+                        f"<code>{html.escape(cmd)}</code>",
+                        parse_mode="html",
+                    )
+                else:
+                    await event.reply(
+                        f"<code>{html.escape(cmd[:3700])}...</code>\n<i>(Команда превышает лимит сообщения и частично обрезана)</i>",
+                        parse_mode="html",
+                    )
+            else:
+                await event.answer("Команда не найдена или устарела.", alert=True)
+
         elif data.startswith("fav_run:"):
             alias = data.split(":", 1)[1]
             favs = favorites_manager.get_favorites(event.sender_id)
             cmd = favs.get(alias)
-            if cmd:
-                await event.answer(f"Запуск: {alias}")
-                await executor.execute(event.chat_id, event.sender_id, cmd)
-            else:
+            if not cmd:
                 await event.answer("Команда не найдена!", alert=True)
+                return
+
+            if executor.get_active_process(event.sender_id):
+                await event.answer("⚠️ У вас уже запущен процесс! Дождитесь завершения или прервите его.", alert=True)
+                return
+
+            await event.answer(f"Запуск: {alias}")
+            await executor.execute(event.chat_id, event.sender_id, cmd)
 
     # --- Основной обработчик команд shell ---
     @client.on(events.NewMessage)
