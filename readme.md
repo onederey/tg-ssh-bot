@@ -146,16 +146,16 @@ chmod +x $PREFIX/var/service/tg-ssh-bot/run
 
 ### 4. Настройка логирования (опционально)
 
-Создайте файл `$PREFIX/var/service/tg-ssh-bot/log/run` для автоматической ротации логов утилитой `svlogd`:
+Для автоматической записи и ротации логов стандартным механизмом `termux-services` создайте символическую ссылку на `svlogger`:
 
 ```bash
-cat << 'EOF' > $PREFIX/var/service/tg-ssh-bot/log/run
-#!/data/data/com.termux/files/usr/bin/sh
-exec svlogd -tt /data/data/com.termux/files/home/tg-ssh-bot/logs
-EOF
+ln -sf $PREFIX/share/termux-services/svlogger $PREFIX/var/service/tg-ssh-bot/log/run
+```
 
-chmod +x $PREFIX/var/service/tg-ssh-bot/log/run
-mkdir -p /data/data/com.termux/files/home/tg-ssh-bot/logs
+Логи сервиса будут автоматически записываться в каталог `$PREFIX/var/log/sv/tg-ssh-bot/current`. Просматривать их в реальном времени можно командой:
+
+```bash
+tail -f $PREFIX/var/log/sv/tg-ssh-bot/current
 ```
 
 ### 5. Управление сервисом
