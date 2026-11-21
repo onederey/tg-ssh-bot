@@ -229,7 +229,7 @@ class ProcessContext:
         self.is_done = False
         self.total_bytes_written = 0
         self.is_log_truncated = False
-        self.log_file = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
+        self.log_file = tempfile.NamedTemporaryFile(mode="w+b", suffix=".log", delete=False)
 
     def append_output(self, data: bytes):
         """Записывает сырые данные во временный файл и поддерживает кольцевой буфер в памяти."""
@@ -297,6 +297,24 @@ class ProcessContext:
                 os.unlink(self.log_file.name)
             except Exception:
                 pass
+
+
+class PTYReaderProtocol(asyncio.Protocol):
+    """Асинхронный протокол для прямого реактивного захвата вывода PTY без промежуточных буферов."""
+
+    def __init__(self, ctx: ProcessContext):
+        self.ctx = ctx
+        self.closed_event = asyncio.Event()
+
+    def connection_made(self, transport: asyncio.BaseTransport):
+        self.ctx.pty_transport = transport
+
+    def data_received(self, data: bytes):
+        self.ctx.append_output(data)
+
+    def connection_lost(self, exc: Optional[Exception]):
+        # В Linux при закрытии slave PTY возникает EIO (Errno 5) — это штатное завершение вывода
+        self.closed_event.set()
 
 
 class CommandExecutor:
@@ -431,15 +449,43 @@ class CommandExecutor:
                 )
                 self.running_processes[user_id] = ctx
 
-                # Запуск чтения вывода
-                if HAS_PTY and master_fd is not None:
-                    read_task = asyncio.create_task(self._read_pty_output(ctx, status_msg, chat_id, user_id))
-                else:
-                    read_task = asyncio.create_task(self._read_pipe_output(ctx, status_msg, chat_id, user_id))
+                # Фоновое обновление Telegram-сообщения
+                update_task = asyncio.create_task(self._update_loop(ctx, status_msg))
 
-                await proc.wait()
+                # Чтение вывода и ожидание завершения
+                if HAS_PTY and master_fd is not None:
+                    loop = asyncio.get_running_loop()
+                    protocol = PTYReaderProtocol(ctx)
+                    try:
+                        transport, _ = await loop.connect_read_pipe(
+                            lambda: protocol,
+                            os.fdopen(master_fd, "rb", buffering=0),
+                        )
+                        ctx.pty_transport = transport
+                    except Exception as e:
+                        logger.warning(f"Не удалось подключить read pipe к master_fd: {e}")
+                        protocol.closed_event.set()
+
+                    await proc.wait()
+                    # Ожидаем завершения дочитывания буфера PTY до события connection_lost (EIO/EOF)
+                    try:
+                        await asyncio.wait_for(protocol.closed_event.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    read_task = asyncio.create_task(self._read_pipe_output(ctx))
+                    await proc.wait()
+                    try:
+                        await asyncio.wait_for(read_task, timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+
                 ctx.is_done = True
-                await read_task
+                update_task.cancel()
+                try:
+                    await update_task
+                except asyncio.CancelledError:
+                    pass
 
                 # Финальное сообщение
                 await self._finalize_output(ctx, status_msg, chat_id)
@@ -484,72 +530,24 @@ class CommandExecutor:
                     ctx.cleanup()
                 self.running_processes.pop(user_id, None)
 
-    async def _read_pty_output(self, ctx: ProcessContext, status_msg, chat_id: int, user_id: int):
-        """Асинхронное чтение из master FD псевдотерминала с корректным управлением транспортом."""
-        loop = asyncio.get_event_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        try:
-            transport, _ = await loop.connect_read_pipe(
-                lambda: protocol,
-                os.fdopen(ctx.master_fd, "rb", buffering=0),
-            )
-            ctx.pty_transport = transport
-        except Exception as e:
-            logger.warning(f"Не удалось подключить read pipe к master_fd: {e}")
-            return
-
-        try:
-            while not ctx.is_done:
-                try:
-                    chunk = await asyncio.wait_for(reader.read(1024), timeout=0.5)
-                    if not chunk:
-                        break
-                    ctx.append_output(chunk)
-                    await self._maybe_update_message(ctx, status_msg)
-                except asyncio.TimeoutError:
-                    await self._maybe_update_message(ctx, status_msg)
-                except (OSError, Exception):
-                    # В Linux при завершении дочернего процесса в PTY генерируется EIO (Errno 5)
-                    break
-
-            # Вычитываем оставшиеся данные после завершения процесса
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(reader.read(1024), timeout=0.1)
-                    if not chunk:
-                        break
-                    ctx.append_output(chunk)
-                except Exception:
-                    break
-        finally:
-            if ctx.pty_transport and not ctx.pty_transport.is_closing():
-                try:
-                    ctx.pty_transport.close()
-                except Exception:
-                    pass
-
-    async def _read_pipe_output(self, ctx: ProcessContext, status_msg, chat_id: int, user_id: int):
-        """Чтение из стандартного async pipe (fallback для не-PTY окружений)."""
+    async def _update_loop(self, ctx: ProcessContext, status_msg):
+        """Фоновый цикл обновления сообщения в Telegram без блокировки чтения вывода."""
         while not ctx.is_done:
             try:
-                chunk = await asyncio.wait_for(ctx.process.stdout.read(2048), timeout=0.5)
-                if not chunk:
-                    if ctx.process.returncode is not None:
-                        break
-                    await asyncio.sleep(0.1)
-                    continue
-                ctx.append_output(chunk)
+                await asyncio.sleep(0.5)
+                if ctx.is_done:
+                    break
                 await self._maybe_update_message(ctx, status_msg)
-            except asyncio.TimeoutError:
-                await self._maybe_update_message(ctx, status_msg)
-            except Exception:
+            except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.debug(f"Ошибка в цикле обновления: {e}")
 
-        # Вычитываем оставшиеся байты
+    async def _read_pipe_output(self, ctx: ProcessContext):
+        """Чтение из стандартного async pipe (fallback для не-PTY окружений) до полного EOF."""
         while True:
             try:
-                chunk = await asyncio.wait_for(ctx.process.stdout.read(2048), timeout=0.1)
+                chunk = await ctx.process.stdout.read(4096)
                 if not chunk:
                     break
                 ctx.append_output(chunk)
