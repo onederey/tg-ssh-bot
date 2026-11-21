@@ -34,12 +34,12 @@ MAX_LOG_BYTES = 20 * 1024 * 1024  # 20 МБ максимальный разме�
 
 
 def clean_terminal_output(text: str) -> str:
-    """Удаляет ANSI коды и нормализует переводы строк (включая возврат каретки \\r)."""
+    """Удаляет ANSI коды и нормализует переводы строк (включая возврат каретки \r)."""
     text = ANSI_ESCAPE.sub("", text)
     # Обработка возвратов каретки (\r) для утилит вроде curl/wget со статус-барами
     lines = []
     for line in text.split("\n"):
-        parts = line.split("\r")
+        parts = line.rstrip("\r").split("\r")
         lines.append(parts[-1])
     return "\n".join(lines)
 
@@ -379,12 +379,12 @@ class CommandExecutor:
 
         body = cleaned.strip()
         if not body:
-            body = "<i>(Вывод пуст)</i>"
+            body = "(Вывод пуст)"
 
         safe_cmd = html.escape(ctx.cmd)
 
-        # Если вывод целиком уместился в одно сообщение и файл лога не был урезан
-        if ctx.total_bytes_written <= len(cleaned) and len(body) <= MAX_TG_CHARS and not ctx.is_log_truncated:
+        # Если вывод целиком уместился в одно сообщение и буфер не был урезан
+        if len(body) <= MAX_TG_CHARS and not ctx.is_log_truncated and ctx.total_bytes_written <= MAX_BUFFER_CHARS:
             safe_body = html.escape(body)
             if len(safe_body) > MAX_TG_CHARS:
                 safe_body = safe_body[-MAX_TG_CHARS:]
